@@ -76,9 +76,19 @@
   - `order(security, amount, price=None, style=None, wait_timeout=None)`：按股数下单；`amount>0` 买入，`<0` 卖出；`style=LimitOrderStyle(price)` 显式限价；仅传 `price` 默认视为市价单带保护价（`MarketOrderStyle(limit_price=price)`）。  
   - `order_value(security, value, price=None, style=None, wait_timeout=None)`：按金额下单，数量在撮合时根据价差计算；传 `price` 同样默认市价+保护价，限价需用 `LimitOrderStyle`。  
   - `order_target(security, amount, price=None, style=None, wait_timeout=None)`：将持仓调整到目标股数；价格参数同上。  
-  - `order_target_value(security, value, price=None, style=None, wait_timeout=None)`：将持仓调整到目标市值；价格参数同上。  
-  - `cancel_order(order_or_id)`：撤单；若订单仍在本地队列直接移除，否则尝试用券商订单号撤券商。  
-  - `cancel_all_orders()`：撤销本地队列所有订单。  
+  - `order_target_value(security, value, price=None, style=None, wait_timeout=None)`：将持仓调整到目标市值；价格参数同上。
+  - `cancel_order(order_or_id)`：撤单；若订单仍在本地队列直接移除，否则尝试用券商订单号撤券商。
+  - `cancel_all_orders()`：撤销本地队列所有订单。
+
+  > **`wait_timeout` 参数说明（仅实盘生效）**
+  >
+  > | 值 | 行为 |
+  > |---|------|
+  > | `None`（默认） | 使用全局配置 `TRADE_MAX_WAIT_TIME`，默认 **16 秒**同步等待 |
+  > | `> 0`（如 `10`） | 同步等待指定秒数，超时后返回 |
+  > | `0` | 异步模式，立即返回订单对象，由后台跟踪 |
+  >
+  > 回测模式下此参数无效，下单即撮合。
   - `get_open_orders()`：返回当日未完成订单字典，`key=order_id`，`value=Order` 快照；未完成状态包含 `new/open/filling/canceling`。  
   - `get_orders(order_id=None, security=None, status=None, from_broker=False)`：返回当日订单字典，支持按订单号/标的/状态过滤；`status` 支持 `OrderStatus` 或字符串值；`from_broker=False`（默认）时返回引擎视角订单，`from_broker=True` 时返回券商侧全量订单快照（含人工/外部委托）。  
   - `get_trades(order_id=None, security=None)`：返回当日成交字典，`key=trade_id`，`value=Trade` 快照；一个订单可对应多笔成交。  

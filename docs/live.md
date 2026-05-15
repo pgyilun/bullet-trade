@@ -90,7 +90,37 @@ bullet-trade --env-file .env server --listen 0.0.0.0 --port 58620 --enable-data 
 QMT_SERVER_ACCOUNT_KEY=main
 ```
 
-## 5. 常见问题
+## 5. 模拟盘/实盘切换检查
+
+模拟盘和实盘应尽量使用同一份策略代码，只通过 `.env` 切换账户、网关地址和风控参数。切换前先确认这几件事：
+
+| 检查项 | 模拟盘 | 实盘 |
+|--------|--------|------|
+| QMT 账号 | 仿真或测试资金号 | 真实资金号 |
+| bullet-trade server | 默认 `58620`，提供行情和交易能力 | 默认 `58620`，提供行情和交易能力 |
+| 上层 V2 网关 | 如使用 AIStocks V2，策略通常连 V2 端口（例如 `59620`） | 同样连 V2 端口，V2 再连 bullet-trade server |
+| 下单等待 | 可用 `TRADE_MAX_WAIT_TIME=0` 压测异步链路 | 建议保留同步等待或按单设置 `wait_timeout` |
+| 风控 | 先放宽，确认链路能跑通 | 再启用 `RISK_CHECK_ENABLED`、`MIN_BUY_ORDER_VALUE` 等 |
+
+不要把 `QMT_SERVER_PORT` 和上层 V2 端口混用：`QMT_SERVER_PORT` 是 bullet-trade server 的端口；如果策略通过 AIStocks V2 运行，V2 自己的端口应写在对应 V2 环境变量里。
+
+## 6. 下单等待（同步/异步）
+
+实盘下单时，引擎默认会**同步等待最多 16 秒**再返回结果。可以通过两种方式调整：
+
+| 方式 | 说明 |
+|------|------|
+| `.env` 设置 `TRADE_MAX_WAIT_TIME` | 全局生效，默认 `16`；设 `0` 为纯异步 |
+| 函数参数 `wait_timeout=10` | 单次下单覆盖，优先级高于环境变量 |
+
+策略中批量异步下单示例：
+
+```python
+order_target('000001.XSHE', 0, wait_timeout=0)   # 立即返回
+order('600519.XSHG', 100, wait_timeout=10)         # 等 10 秒
+```
+
+## 7. 常见问题
 
 ### 为什么文档里不再写一大堆 `.env`
 

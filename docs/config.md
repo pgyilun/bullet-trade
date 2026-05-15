@@ -66,6 +66,11 @@ bullet-trade live strategies/demo_strategy.py --broker qmt-remote
 
 单账户时，不用写 `QMT_SERVER_ACCOUNT_KEY`。
 
+如果策略外层还接了 AIStocks V2 或其他调度网关，要分清两层端口：
+
+- `QMT_SERVER_PORT`：bullet-trade server 端口，默认常用 `58620`
+- 上层网关端口：由上层系统自己的环境变量配置，例如策略连 V2 时通常不是 `QMT_SERVER_PORT`
+
 ## 4. 多账户时才需要的参数
 
 ### server 端
@@ -104,6 +109,7 @@ QMT_SERVER_ACCOUNT_KEY=main
 - `MAX_DAILY_TRADES`
 - `RISK_CHECK_ENABLED`
 - `QMT_SERVER_TLS_CERT`
+- `TRADE_MAX_WAIT_TIME`  — 实盘下单同步等待秒数（默认 `16`，设 `0` 则异步不等待）
 
 `MIN_BUY_ORDER_VALUE` 用于过滤实盘买入小单，默认 `0` 表示不限制。它只在风控开启后生效：本地 LiveEngine 需 `RISK_CHECK_ENABLED=true`，远程 QMT server 需 `QMT_SERVER_ORDER_RISK_ENABLED=true`。该参数只拦截买入订单，卖出、清仓和降仓不受影响。
 

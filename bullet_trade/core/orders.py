@@ -142,13 +142,17 @@ def order(
 ) -> Optional[Order]:
     """
     按股数下单
-    
+
     Args:
         security: 标的代码
         amount: 股数，正数表示买入，负数表示卖出
         price: 委托价格，None表示市价单
         style: 下单方式或市价参数（策略覆写）
-        
+        wait_timeout: 实盘下单等待超时（秒）；
+            None（默认）使用全局 TRADE_MAX_WAIT_TIME（默认16秒）；
+            >0 同步等待指定秒数；0 异步立即返回。
+            回测模式下此参数无效。
+
     Returns:
         Order对象，如果下单失败返回None
     """
@@ -264,15 +268,19 @@ def order_value(
 ) -> Optional[Order]:
     """
     按价值下单
-    
+
     Args:
         security: 标的代码
         value: 目标价值，正数表示买入，负数表示卖出
         price: 委托价格，None表示市价单
-        
+        wait_timeout: 实盘下单等待超时（秒）；
+            None（默认）使用全局 TRADE_MAX_WAIT_TIME（默认16秒）；
+            >0 同步等待指定秒数；0 异步立即返回。
+            回测模式下此参数无效。
+
     Returns:
         Order对象，如果下单失败返回None
-        
+
     Note:
         实际数量会在撮合时根据当前价格计算
     """
@@ -328,6 +336,16 @@ def order_target(
 ) -> Optional[Order]:
     """
     目标股数下单（调整持仓到目标数量）
+
+    Args:
+        security: 标的代码
+        amount: 目标股数
+        price: 委托价格，None表示市价单
+        style: 下单方式或市价参数（策略覆写）
+        wait_timeout: 实盘下单等待超时（秒）；
+            None（默认）使用全局 TRADE_MAX_WAIT_TIME（默认16秒）；
+            >0 同步等待指定秒数；0 异步立即返回。
+            回测模式下此参数无效。
     """
     if isinstance(price, (MarketOrderStyle, LimitOrderStyle)):
         style = price
@@ -376,6 +394,16 @@ def order_target_value(
 ) -> Optional[Order]:
     """
     目标价值下单（调整持仓到目标价值）
+
+    Args:
+        security: 标的代码
+        value: 目标价值
+        price: 委托价格，None表示市价单
+        style: 下单方式或市价参数（策略覆写）
+        wait_timeout: 实盘下单等待超时（秒）；
+            None（默认）使用全局 TRADE_MAX_WAIT_TIME（默认16秒）；
+            >0 同步等待指定秒数；0 异步立即返回。
+            回测模式下此参数无效。
     """
     if isinstance(price, (MarketOrderStyle, LimitOrderStyle)):
         style = price

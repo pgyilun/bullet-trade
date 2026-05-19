@@ -4,6 +4,15 @@ from helpers import bullet_trade_jq_remote_helper as helper
 from tests.test_remote_server import stub_server  # 复用 stub server fixture
 
 
+class _RecordingClient:
+    def __init__(self):
+        self.requests = []
+
+    def request(self, action, payload):
+        self.requests.append((action, dict(payload)))
+        return {"order_id": "oid-1", "status": "open", "amount": payload.get("amount"), "price": 10.0}
+
+
 def test_helper_restores_legacy_stringified_tuple_columns():
     payload = {
         "dtype": "dataframe",
@@ -25,6 +34,18 @@ def test_helper_restores_legacy_stringified_tuple_columns():
         ("open", "000001.XSHG"),
     ]
     assert df["open"]["600635.XSHG"].iloc[0] == 5.4
+
+
+def test_helper_order_sends_zero_wait_timeout():
+    client = _RecordingClient()
+    broker = helper.RemoteBrokerClient(client, account_key="default")
+
+    oid = broker.order("000001.XSHE", 100, price=10.0, wait_timeout=0)
+
+    assert oid == "oid-1"
+    action, payload = client.requests[0]
+    assert action == "broker.place_order"
+    assert payload["wait_timeout"] == 0
 
 
 def test_helper_e2e_with_stub(stub_server):

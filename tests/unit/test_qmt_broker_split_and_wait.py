@@ -60,6 +60,29 @@ async def test_sync_wait_breaks_early(monkeypatch):
     assert time.time() - t0 < 1.0
 
 
+@pytest.mark.asyncio
+async def test_zero_wait_override_skips_global_sync_wait(monkeypatch):
+    broker = QmtBroker(account_id="test")
+    broker._connected = True
+    called = False
+
+    monkeypatch.setattr(
+        "bullet_trade.utils.env_loader.get_live_trade_config",
+        lambda: {"order_max_volume": 1000000, "trade_max_wait_time": 16},
+    )
+
+    async def _status(_oid):
+        nonlocal called
+        called = True
+        return {"status": "open"}
+
+    broker.get_order_status = _status  # type: ignore
+    t0 = time.time()
+    await broker._maybe_wait("abc", override_timeout=0)
+    assert time.time() - t0 < 0.2
+    assert called is False
+
+
 def test_qmt_symbol_mapping_roundtrip():
     broker = QmtBroker(account_id="test")
     assert broker._map_security("000001.XSHE") == "000001.SZ"

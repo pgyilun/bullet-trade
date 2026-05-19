@@ -553,6 +553,8 @@ class RemoteBrokerClient:
                 "amount": amount,
                 "style": style,
             })
+            if wait_timeout is not None:
+                payload["wait_timeout"] = wait_timeout
             
             _log("DEBUG", "[下单] 发送下单请求: payload={}", payload)
             resp = self._client.request("broker.place_order", payload)

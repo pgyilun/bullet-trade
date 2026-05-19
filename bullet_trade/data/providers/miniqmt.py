@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
-from datetime import datetime, date as Date
-from typing import Any, Dict, List, Optional, Union, Tuple
+from datetime import date as Date
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
-import logging
 
-from .base import DataProvider
+from ..backtest_session import get_current_backtest_data_session
 from ..cache import CacheManager
+from .base import DataProvider
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +179,123 @@ class MiniQMTProvider(DataProvider):
         fmt = "%Y%m%d" if normalized == "1d" else "%Y%m%d%H%M%S"
         return dt.strftime(fmt)
 
+    def _download_history_data(
+        self,
+        xt: Any,
+        security: str,
+        period: str,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> None:
+        """
+        调用 QMT 历史数据下载接口，并兼容不同 xtquant 版本签名。
+
+        Args:
+            xt: xtdata 模块或兼容对象。
+            security: QMT 格式证券代码。
+            period: QMT 周期。
+            start_dt: 可选下载起始时间。
+            end_dt: 可选下载结束时间。
+
+        Side Effects:
+            触发 QMT 官方数据目录的历史数据下载，不修改用户 auto_download 配置。
+        """
+        start_time = self._format_time(start_dt, period)
+        end_time = self._format_time(end_dt, period)
+        if start_time or end_time:
+            try:
+                xt.download_history_data(
+                    stock_code=security,
+                    period=period,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+                return
+            except TypeError:
+                pass
+        xt.download_history_data(stock_code=security, period=period)
+
+    def _prepare_backtest_history_data(
+        self,
+        xt: Any,
+        security: str,
+        period: str,
+        start_date: Optional[Union[str, datetime]],
+        end_date: Optional[Union[str, datetime]],
+        count: Optional[int],
+    ) -> bool:
+        """
+        在回测数据会话中准备 QMT 历史数据并对重复下载去重。
+
+        Args:
+            xt: xtdata 模块或兼容对象。
+            security: QMT 格式证券代码。
+            period: QMT 周期。
+            start_date: 本次行情请求起始时间。
+            end_date: 本次行情请求结束时间。
+            count: 本次行情请求条数。
+
+        Returns:
+            bool: 已由回测数据会话处理返回 True；未启用或不适用返回 False。
+        """
+        if self.mode != "backtest":
+            return False
+        session = get_current_backtest_data_session()
+        if session is None:
+            return False
+
+        def _download(start_dt: Optional[datetime], end_dt: Optional[datetime]) -> None:
+            """
+            下载指定覆盖区间的 QMT 历史数据。
+
+            Args:
+                start_dt: 下载起始时间。
+                end_dt: 下载结束时间。
+            """
+            self._download_history_data(xt, security, period, start_dt, end_dt)
+
+        def _read_local(start_dt: Optional[datetime], end_dt: Optional[datetime]) -> pd.DataFrame:
+            """
+            读取本地未复权数据用于覆盖校验。
+
+            Args:
+                start_dt: 校验起始时间。
+                end_dt: 校验结束时间。
+
+            Returns:
+                pd.DataFrame: QMT 本地 K 线数据。
+            """
+            return self._fetch_local_data(
+                xt,
+                security=security,
+                period=period,
+                start_time=self._format_time(start_dt, period),
+                end_time=self._format_time(end_dt, period),
+                count=None,
+                dividend_type="none",
+            )
+
+        before_manifest_count = len(session.qmt_manifest)
+        handled = session.ensure_qmt_downloaded(
+            provider_name=self.name,
+            security=security,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
+            count=count,
+            download_fn=_download,
+            local_data_fn=_read_local,
+        )
+        latest_manifest = (
+            session.qmt_manifest[-1] if len(session.qmt_manifest) > before_manifest_count else {}
+        )
+        if session.config.qmt_require_coverage and latest_manifest.get("coverage_ok") is False:
+            raise RuntimeError(
+                f"QMT 本地数据覆盖不足: security={security}, period={period}, "
+                f"start_date={start_date}, end_date={end_date}"
+            )
+        return handled
+
     def get_current_tick(
         self,
         security: str,
@@ -196,7 +315,11 @@ class MiniQMTProvider(DataProvider):
                     last = quote.get("lastPrice") or quote.get("last_price") or quote.get("price")
                     ts = quote.get("time") or quote.get("datetime")
                 else:
-                    last = getattr(quote, "lastPrice", None) or getattr(quote, "last_price", None) or getattr(quote, "price", None)
+                    last = (
+                        getattr(quote, "lastPrice", None)
+                        or getattr(quote, "last_price", None)
+                        or getattr(quote, "price", None)
+                    )
                     ts = getattr(quote, "time", None) or getattr(quote, "datetime", None)
                 if ts is None:
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -242,9 +365,15 @@ class MiniQMTProvider(DataProvider):
         return "1d"
 
     # ------------------------ 认证 ------------------------
-    def auth(self, user: Optional[str] = None, pwd: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None) -> None:
+    def auth(
+        self,
+        user: Optional[str] = None,
+        pwd: Optional[str] = None,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+    ) -> None:
         _ = user, pwd, host, port
-        xt = self._ensure_xtdata()
+        self._ensure_xtdata()
         if not self.data_dir:
             env_dir = os.getenv("QMT_DATA_PATH")
             if env_dir:
@@ -359,7 +488,9 @@ class MiniQMTProvider(DataProvider):
                     pre_factor_ref_date=kw.get("pre_factor_ref_date"),
                 )
 
-            cached_frames[normalized] = self._cache.cached_call("get_price", kwargs, _fetch_single, result_type="df")
+            cached_frames[normalized] = self._cache.cached_call(
+                "get_price", kwargs, _fetch_single, result_type="df"
+            )
 
         for sec in securities:
             normalized = normalized_map[sec]
@@ -395,7 +526,16 @@ class MiniQMTProvider(DataProvider):
         start_str = self._format_time(start_date, period)
         end_str = self._format_time(end_date, period)
         if self.auto_download:
-            xt.download_history_data(stock_code=security, period=period)
+            handled = self._prepare_backtest_history_data(
+                xt,
+                security=security,
+                period=period,
+                start_date=start_date,
+                end_date=end_date,
+                count=count,
+            )
+            if not handled:
+                self._download_history_data(xt, security, period)
 
         raw_df = self._fetch_local_data(
             xt,
@@ -475,83 +615,82 @@ class MiniQMTProvider(DataProvider):
     ) -> pd.DataFrame:
         """
         填充停牌日数据，使 QMT 行为与 JQData 的 skip_paused=False 一致。
-        
+
         QMT 的 get_local_data 不返回停牌日的数据，但 JQData 会返回（volume=0, paused=1）。
         此方法检查日期范围内缺失的交易日，并用前一天的收盘价填充。
         """
         if df.empty:
             return df
-        
+
         try:
             # 使用 df 的实际日期范围，而不是传入的 start_date/end_date
             # 因为传入的 end_date 可能被 _fetch_local_data 往后推了
             df_min_date = df.index.min()
             df_max_date = df.index.max()
-            
+
             # 转换为日期对象
-            if hasattr(df_min_date, 'date'):
+            if hasattr(df_min_date, "date"):
                 actual_start = df_min_date.date()
-            elif hasattr(df_min_date, 'to_pydatetime'):
+            elif hasattr(df_min_date, "to_pydatetime"):
                 actual_start = df_min_date.to_pydatetime().date()
             else:
                 actual_start = df_min_date
-                
-            if hasattr(df_max_date, 'date'):
+
+            if hasattr(df_max_date, "date"):
                 actual_end = df_max_date.date()
-            elif hasattr(df_max_date, 'to_pydatetime'):
+            elif hasattr(df_max_date, "to_pydatetime"):
                 actual_end = df_max_date.to_pydatetime().date()
             else:
                 actual_end = df_max_date
-            
+
             # 如果有 end_date 参数，使用它作为实际结束日期（确保包含请求的 end_date）
             if end_date:
                 try:
                     req_end = pd.to_datetime(end_date).date()
                     # 只在 req_end 在合理范围内时使用（不能是未来的日期）
                     from datetime import date as Date
+
                     today = Date.today()
                     if req_end <= today and req_end >= actual_start:
                         actual_end = max(actual_end, req_end)
                 except Exception:
                     pass
-            
+
             # 获取日期范围内的所有交易日
             start_str = self._format_time(actual_start, "1d")
             end_str = self._format_time(actual_end, "1d")
-            
+
             logger.debug(f"QMT _fill_paused_days: 查询交易日范围 {start_str} - {end_str}")
-            
+
             trade_days_ts = xt.get_trading_dates(
-                self.market, 
-                start_time=start_str, 
-                end_time=end_str, 
-                count=-1
+                self.market, start_time=start_str, end_time=end_str, count=-1
             )
             if not trade_days_ts:
                 return df
-            
+
             # 转换为日期集合
             from datetime import datetime as dt
+
             trade_days = set()
             for ts in trade_days_ts:
                 d = dt.fromtimestamp(ts / 1000.0).date()
                 trade_days.add(d)
-            
+
             # 获取 df 中已有的日期
             existing_dates = set()
             for idx in df.index:
-                if hasattr(idx, 'date'):
+                if hasattr(idx, "date"):
                     existing_dates.add(idx.date())
-                elif hasattr(idx, 'to_pydatetime'):
+                elif hasattr(idx, "to_pydatetime"):
                     existing_dates.add(idx.to_pydatetime().date())
-            
+
             # 找出缺失的交易日（停牌日）
             missing_dates = trade_days - existing_dates
             if not missing_dates:
                 return df
-            
-            #logger.debug(f"QMT _fill_paused_days: 发现 {len(missing_dates)} 个停牌日需要填充: {sorted(missing_dates)}")
-            
+
+            # logger.debug(f"QMT _fill_paused_days: 发现 {len(missing_dates)} 个停牌日需要填充: {sorted(missing_dates)}")
+
             # 为缺失的日期创建填充行
             fill_rows = []
             for missing_date in sorted(missing_dates):
@@ -564,41 +703,40 @@ class MiniQMTProvider(DataProvider):
                 elif not df.empty:
                     # 如果没有更早的数据，用第一行作为参考
                     ref_row = df.iloc[0]
-                
+
                 if ref_row is not None:
                     # 创建停牌日数据行
                     fill_data = {}
-                    close_price = ref_row.get('close', 0.0)
+                    close_price = ref_row.get("close", 0.0)
                     for col in df.columns:
-                        if col in ('open', 'high', 'low', 'close'):
+                        if col in ("open", "high", "low", "close"):
                             fill_data[col] = close_price
-                        elif col == 'volume':
+                        elif col == "volume":
                             fill_data[col] = 0.0
-                        elif col == 'money':
+                        elif col == "money":
                             fill_data[col] = 0.0
-                        elif col == 'paused':
+                        elif col == "paused":
                             fill_data[col] = 1.0  # 标记为停牌
                         else:
                             fill_data[col] = 0.0
-                    
+
                     fill_rows.append((pd.Timestamp(missing_date).normalize(), fill_data))
-            
+
             if fill_rows:
                 # 添加 paused 列（如果不存在）
-                if 'paused' not in df.columns:
+                if "paused" not in df.columns:
                     df = df.copy()
-                    df['paused'] = 0.0
-                
+                    df["paused"] = 0.0
+
                 # 创建填充 DataFrame 并合并
                 fill_df = pd.DataFrame(
-                    [row[1] for row in fill_rows],
-                    index=[row[0] for row in fill_rows]
+                    [row[1] for row in fill_rows], index=[row[0] for row in fill_rows]
                 )
                 df = pd.concat([df, fill_df]).sort_index()
-                #logger.debug(f"QMT _fill_paused_days: 填充后 df.index={df.index.tolist()[-5:] if len(df) > 5 else df.index.tolist()}")
-            
+                # logger.debug(f"QMT _fill_paused_days: 填充后 df.index={df.index.tolist()[-5:] if len(df) > 5 else df.index.tolist()}")
+
             return df
-            
+
         except Exception as e:
             logger.debug(f"QMT _fill_paused_days: 填充失败 {e}")
             return df
@@ -629,6 +767,7 @@ class MiniQMTProvider(DataProvider):
         sample = [float(x) for x in sample if pd.notna(x)]
         if not sample:
             return 2
+
         def _score(dec):
             tol = 5e-5 if dec <= 2 else 5e-6
             ok = 0
@@ -636,6 +775,7 @@ class MiniQMTProvider(DataProvider):
                 if abs(v - round(v, dec)) <= tol:
                     ok += 1
             return ok / len(sample)
+
         score2 = _score(2)
         score3 = _score(3)
         # Prefer smallest decimals that fits well; require high fit to choose lower precision
@@ -645,6 +785,196 @@ class MiniQMTProvider(DataProvider):
             return 3
         # Fall back to 2
         return 2
+
+    def _local_block_cache_bounds(
+        self,
+        period: str,
+        start_time: str,
+        end_time: str,
+        count: Optional[int],
+    ) -> Optional[tuple[str, str]]:
+        """
+        计算回测会话内 QMT 本地数据块缓存的覆盖范围。
+
+        Args:
+            period: QMT 周期。
+            start_time: 本次请求起始时间字符串。
+            end_time: 本次请求结束时间字符串。
+            count: 本次请求条数。
+
+        Returns:
+            Optional[tuple[str, str]]: 可缓存时返回块级起止时间字符串，否则返回 None。
+        """
+        session = get_current_backtest_data_session()
+        if session is None:
+            return None
+
+        block_end = session.config.end_date
+        if block_end is None and end_time:
+            try:
+                block_end = pd.to_datetime(end_time).to_pydatetime()
+            except Exception:
+                block_end = None
+        if block_end is None:
+            return None
+
+        normalized_period = self._normalize_period(period)
+        if normalized_period != "1d" and block_end.time() == datetime.min.time():
+            block_end = block_end.replace(hour=15, minute=0, second=0)
+
+        block_start = session.config.start_date
+        request_start = None
+        if start_time:
+            try:
+                request_start = pd.to_datetime(start_time).to_pydatetime()
+            except Exception:
+                request_start = None
+
+        if count:
+            if block_start is None:
+                block_start = session.config.start_date
+            anchor = session.config.start_date or block_start or block_end
+            if normalized_period == "1d":
+                buffer_days = max(int(count) * 2, 800)
+            else:
+                buffer_days = max(int(count / 240) + 3, 3)
+            count_start = anchor - pd.Timedelta(days=buffer_days)
+            if hasattr(count_start, "to_pydatetime"):
+                count_start_dt = count_start.to_pydatetime()
+            else:
+                count_start_dt = count_start
+            block_start = min(block_start, count_start_dt) if block_start else count_start_dt
+            if request_start is not None and request_start < block_start:
+                block_start = request_start
+        elif request_start is not None:
+            block_start = min(block_start, request_start) if block_start else request_start
+
+        if block_start is None:
+            return None
+        return self._format_time(block_start, normalized_period), self._format_time(
+            block_end, normalized_period
+        )
+
+    @staticmethod
+    def _slice_local_data_block(
+        df: pd.DataFrame,
+        period: str,
+        start_time: str,
+        end_time: str,
+        count: Optional[int],
+    ) -> pd.DataFrame:
+        """
+        从块级本地数据中切出本次请求窗口。
+
+        Args:
+            df: 缓存的块级 K 线数据。
+            period: QMT 周期。
+            start_time: 本次请求起始时间字符串。
+            end_time: 本次请求结束时间字符串。
+            count: 本次请求条数。
+
+        Returns:
+            pd.DataFrame: 与原 _fetch_local_data 输出语义一致的切片副本。
+        """
+        if df.empty:
+            return df.copy()
+        sliced = df
+        try:
+            if start_time:
+                start_dt = pd.to_datetime(start_time)
+                if period == "1d":
+                    start_dt = start_dt.normalize()
+                sliced = sliced[sliced.index >= start_dt]
+            if end_time:
+                end_dt = pd.to_datetime(end_time)
+                if period == "1d":
+                    end_dt = end_dt.normalize()
+                sliced = sliced[sliced.index <= end_dt]
+        except Exception:
+            return df.copy()
+        if count:
+            sliced = sliced.tail(count)
+        return sliced.copy()
+
+    def _try_fetch_local_data_from_session(
+        self,
+        xt,
+        security: str,
+        period: str,
+        start_time: str,
+        end_time: str,
+        count: Optional[int],
+        dividend_type: str,
+    ) -> Optional[pd.DataFrame]:
+        """
+        尝试从回测数据会话读取 MiniQMT 本地行情块。
+
+        Args:
+            xt: xtdata 模块或兼容对象。
+            security: QMT 格式证券代码。
+            period: QMT 周期。
+            start_time: 本次请求起始时间字符串。
+            end_time: 本次请求结束时间字符串。
+            count: 本次请求条数。
+            dividend_type: QMT 复权数据类型。
+
+        Returns:
+            Optional[pd.DataFrame]: 命中或成功构建时返回切片；未启用或降级时返回 None。
+        """
+        if self.mode != "backtest":
+            return None
+        session = get_current_backtest_data_session()
+        if session is None or not session.config.price_block_cache_enabled:
+            return None
+
+        bounds = self._local_block_cache_bounds(period, start_time, end_time, count)
+        if bounds is None:
+            session.record_degradation(
+                "qmt_local_block_unsupported_bounds",
+                security=security,
+                period=period,
+                dividend_type=dividend_type,
+            )
+            return None
+
+        block_start, block_end = bounds
+        key = (
+            "qmt_local_data",
+            self.name,
+            security,
+            period,
+            dividend_type,
+            block_start,
+            block_end,
+        )
+        cached = session.get_price_block(key)
+        if cached is None:
+            try:
+                block = self._fetch_local_data_uncached(
+                    xt,
+                    security=security,
+                    period=period,
+                    start_time=block_start,
+                    end_time=block_end,
+                    count=None,
+                    dividend_type=dividend_type,
+                )
+            except Exception:
+                session.stats.errors += 1
+                return None
+            if block.empty:
+                session.record_degradation(
+                    "qmt_local_block_empty",
+                    security=security,
+                    period=period,
+                    dividend_type=dividend_type,
+                )
+                return None
+            if not session.set_price_block(key, block, rows=len(block)):
+                return None
+            cached = block
+
+        return self._slice_local_data_block(cached, period, start_time, end_time, count)
 
     def _fetch_local_data(
         self,
@@ -656,17 +986,78 @@ class MiniQMTProvider(DataProvider):
         count: Optional[int],
         dividend_type: str,
     ) -> pd.DataFrame:
+        """
+        读取 QMT 本地行情，回测会话启用时优先使用块级内存缓存。
+
+        Args:
+            xt: xtdata 模块或兼容对象。
+            security: QMT 格式证券代码。
+            period: QMT 周期。
+            start_time: 本次请求起始时间字符串。
+            end_time: 本次请求结束时间字符串。
+            count: 本次请求条数。
+            dividend_type: QMT 复权数据类型。
+
+        Returns:
+            pd.DataFrame: 标准化后的行情数据。
+        """
+        cached = self._try_fetch_local_data_from_session(
+            xt,
+            security=security,
+            period=period,
+            start_time=start_time,
+            end_time=end_time,
+            count=count,
+            dividend_type=dividend_type,
+        )
+        if cached is not None:
+            return cached
+        return self._fetch_local_data_uncached(
+            xt,
+            security=security,
+            period=period,
+            start_time=start_time,
+            end_time=end_time,
+            count=count,
+            dividend_type=dividend_type,
+        )
+
+    def _fetch_local_data_uncached(
+        self,
+        xt,
+        security: str,
+        period: str,
+        start_time: str,
+        end_time: str,
+        count: Optional[int],
+        dividend_type: str,
+    ) -> pd.DataFrame:
+        """
+        直接调用 xt.get_local_data 并按 BulletTrade 口径标准化结果。
+
+        Args:
+            xt: xtdata 模块或兼容对象。
+            security: QMT 格式证券代码。
+            period: QMT 周期。
+            start_time: 请求起始时间字符串。
+            end_time: 请求结束时间字符串。
+            count: 请求条数。
+            dividend_type: QMT 复权数据类型。
+
+        Returns:
+            pd.DataFrame: 标准化后的本地行情数据。
+        """
         # 注意：QMT 的 get_local_data 在使用 count 参数时会跳过停牌日，
         # 导致与 JQData 行为不一致（JQData 会包含停牌日的数据）。
-        # 
+        #
         # 解决方案：当同时指定 end_time 和 count 时，不传 count 给 QMT，
         # 而是先获取到 end_time 的完整数据，再用 tail(count) 截取。
         # 这样可以确保停牌日的数据也被包含在内。
         use_count_in_xt = count
         use_start_time = start_time
-        
+
         use_end_time = end_time
-        
+
         if end_time and count and not start_time:
             # 当没有 start_time 但有 end_time 和 count 时，
             # 需要构造一个合理的 start_time，否则 QMT 不知道从哪开始获取
@@ -680,7 +1071,9 @@ class MiniQMTProvider(DataProvider):
                 # 将 end_time 往后推 10 天，确保停牌日也能被包含（QMT 行为不一致，需要更大的缓冲）
                 use_end_time = (end_dt + pd.Timedelta(days=10)).strftime("%Y%m%d")
                 use_count_in_xt = -1  # 不让 QMT 处理 count
-                logger.debug(f"QMT _fetch_local_data: 构造 start_time={use_start_time}, end_time={use_end_time}(原{end_time}), count={count}")
+                logger.debug(
+                    f"QMT _fetch_local_data: 构造 start_time={use_start_time}, end_time={use_end_time}(原{end_time}), count={count}"
+                )
             except Exception:
                 pass
         elif end_time and count:
@@ -692,7 +1085,7 @@ class MiniQMTProvider(DataProvider):
                 use_count_in_xt = -1
             except Exception:
                 pass
-        
+
         logger.debug(
             f"QMT _fetch_local_data: 调用 xt.get_local_data(stock_list=[{security}], "
             f"count={use_count_in_xt or -1}, period={period}, "
@@ -713,25 +1106,27 @@ class MiniQMTProvider(DataProvider):
                 f"(security={security}, period={period}, start_time={use_start_time}, end_time={end_time})"
             )
             raise
-        
-        #logger.debug(f"QMT _fetch_local_data: xt.get_local_data 返回 data.keys()={list(data.keys()) if data else None}")
-        
+
+        # logger.debug(f"QMT _fetch_local_data: xt.get_local_data 返回 data.keys()={list(data.keys()) if data else None}")
+
         df = data.get(security)
         if df is None or df.empty:
             logger.debug(f"QMT _fetch_local_data: 返回空 DataFrame (df={df})")
             return pd.DataFrame()
-        
+
         df = df.copy()
-        #logger.debug(f"QMT _fetch_local_data: df.columns={list(df.columns)}, df.shape={df.shape}")
-        
+        # logger.debug(f"QMT _fetch_local_data: df.columns={list(df.columns)}, df.shape={df.shape}")
+
         # xtquant 时间戳为毫秒级 UTC，需要转换到沪深时区（Asia/Shanghai）再处理
         if "time" not in df.columns:
             logger.error(
                 f"QMT _fetch_local_data: 数据缺少 'time' 列！"
                 f"现有列: {list(df.columns)}, security={security}, period={period}"
             )
-            raise KeyError(f"数据缺少 'time' 列 (security={security}, period={period}, columns={list(df.columns)})")
-        
+            raise KeyError(
+                f"数据缺少 'time' 列 (security={security}, period={period}, columns={list(df.columns)})"
+            )
+
         idx_utc = pd.to_datetime(df["time"].astype("int64"), unit="ms", utc=True)
         idx = pd.DatetimeIndex(idx_utc).tz_convert("Asia/Shanghai").tz_localize(None)
         # Normalize daily bars to date-only index to align with JQData
@@ -741,10 +1136,10 @@ class MiniQMTProvider(DataProvider):
         df.index.name = None
         df.rename(columns={"amount": "money"}, inplace=True)
         df["money"] = df.get("money", 0.0)
-        
+
         # 在这里处理 count，确保停牌日数据也被包含
         if end_time and count and not df.empty:
-            #logger.debug(f"QMT _fetch_local_data: 截取前 df.index={df.index.tolist()[-5:] if len(df) > 5 else df.index.tolist()}")
+            # logger.debug(f"QMT _fetch_local_data: 截取前 df.index={df.index.tolist()[-5:] if len(df) > 5 else df.index.tolist()}")
             # 先过滤掉超过原始 end_time 的数据（因为我们把 end_time 往后推了）
             try:
                 end_dt = pd.to_datetime(end_time)
@@ -755,13 +1150,13 @@ class MiniQMTProvider(DataProvider):
                     df = df[df.index <= end_dt_normalized]
                 else:
                     df = df[df.index <= end_dt]
-                #logger.debug(f"QMT _fetch_local_data: 过滤后 df.index={df.index.tolist()[-5:] if len(df) > 5 else df.index.tolist()}")
+                # logger.debug(f"QMT _fetch_local_data: 过滤后 df.index={df.index.tolist()[-5:] if len(df) > 5 else df.index.tolist()}")
             except Exception as e:
                 logger.debug(f"QMT _fetch_local_data: 过滤失败 {e}")
             # 然后再 tail(count)
             df = df.tail(count)
-            #logger.debug(f"QMT _fetch_local_data: 截取后 df.index={df.index.tolist()}")
-        
+            # logger.debug(f"QMT _fetch_local_data: 截取后 df.index={df.index.tolist()}")
+
         return df
 
     @classmethod
@@ -774,24 +1169,24 @@ class MiniQMTProvider(DataProvider):
         normalized = dict(event)
         normalized_security = normalized.get("security")
         normalized["security"] = cls._normalize_security_code(normalized_security or "")
-        
+
         # 保持原有 per_base，不做归一化
         try:
             normalized["per_base"] = float(normalized.get("per_base") or 1.0) or 1.0
         except Exception:
             normalized["per_base"] = 1.0
-        
+
         # bonus_pre_tax 保持原值，不除以 per_base
         try:
             normalized["bonus_pre_tax"] = float(normalized.get("bonus_pre_tax") or 0.0)
         except Exception:
             normalized["bonus_pre_tax"] = 0.0
-        
+
         try:
             normalized["scale_factor"] = float(normalized.get("scale_factor", 1.0) or 1.0)
         except Exception:
             normalized["scale_factor"] = 1.0
-        
+
         date_value = normalized.get("date")
         if date_value is not None:
             try:
@@ -951,10 +1346,13 @@ class MiniQMTProvider(DataProvider):
             xt = self._ensure_xtdata()
             start_str = self._format_time(kw.get("start_date"), "1d")
             end_str = self._format_time(kw.get("end_date"), "1d")
-            data = xt.get_trading_dates(self.market, start_time=start_str, end_time=end_str, count=kw.get("count", -1) or -1)
+            data = xt.get_trading_dates(
+                self.market, start_time=start_str, end_time=end_str, count=kw.get("count", -1) or -1
+            )
             # 注意：QMT 返回的时间戳是北京时间（本地时区），需要使用 fromtimestamp 而不是 pd.to_datetime
             # pd.to_datetime(unit='ms') 会当作 UTC 时间处理，导致日期偏移
             from datetime import datetime as dt
+
             return [dt.fromtimestamp(ts / 1000.0) for ts in data]
 
         return self._cache.cached_call("get_trade_days", kwargs, _fetch, result_type="list_date")
@@ -1031,7 +1429,9 @@ class MiniQMTProvider(DataProvider):
             df = pd.DataFrame(rows).drop_duplicates("ts_code").set_index("ts_code")
             return df.to_dict(orient="index")
 
-        data = self._cache.cached_call("get_all_securities", kwargs, _fetch, result_type="list_dict")
+        data = self._cache.cached_call(
+            "get_all_securities", kwargs, _fetch, result_type="list_dict"
+        )
         if not data:
             return pd.DataFrame(columns=["display_name", "name", "start_date", "end_date", "type"])
         df = pd.DataFrame.from_dict(data, orient="index")
@@ -1043,7 +1443,9 @@ class MiniQMTProvider(DataProvider):
         df["end_date"] = pd.to_datetime(df["end_date"])
         return df
 
-    def get_index_stocks(self, index_symbol: str, date: Optional[Union[str, datetime]] = None) -> List[str]:
+    def get_index_stocks(
+        self, index_symbol: str, date: Optional[Union[str, datetime]] = None
+    ) -> List[str]:
         if date is not None:
             logger.warning("MiniQMT 的 get_index_stocks 不支持历史日期，已忽略 date=%s，仅返回最新成分股", date)
         # QMT 只返回最新权重，date 不参与缓存键，避免历史日期导致永久缓存
@@ -1135,55 +1537,55 @@ class MiniQMTProvider(DataProvider):
         try:
             tick_map = xt.get_full_tick([code])
             t = tick_map.get(code) if isinstance(tick_map, dict) else None
-            if not t or t.get('lastPrice') is None:
+            if not t or t.get("lastPrice") is None:
                 return {}
-            last_price = float(t.get('lastPrice'))
+            last_price = float(t.get("lastPrice"))
             info = xt.get_instrument_detail(code)
-            high_limit = float(info.get('UpStopPrice') or 0.0) if isinstance(info, dict) else 0.0
-            low_limit = float(info.get('DownStopPrice') or 0.0) if isinstance(info, dict) else 0.0
+            high_limit = float(info.get("UpStopPrice") or 0.0) if isinstance(info, dict) else 0.0
+            low_limit = float(info.get("DownStopPrice") or 0.0) if isinstance(info, dict) else 0.0
             paused = False
             try:
-                open_int = t.get('openInt') if isinstance(t, dict) else None
+                open_int = t.get("openInt") if isinstance(t, dict) else None
                 if open_int is not None:
                     # 0, 10 - 默认为未知
-                        # 1 - 停牌
-                        # 11 - 开盘前S
-                        # 12 - 集合竞价时段C
-                        # 13 - 连续交易T
-                        # 14 - 休市B
-                        # 15 - 闭市E
-                        # 16 - 波动性中断V
-                        # 17 - 临时停牌P
-                        # 18 - 收盘集合竞价U
-                        # 19 - 盘中集合竞价M
-                        # 20 - 暂停交易至闭市N
-                        # 21 - 获取字段异常
-                        # 22 - 盘后固定价格行情
-                        # 23 - 盘后固定价格行情完毕
+                    # 1 - 停牌
+                    # 11 - 开盘前S
+                    # 12 - 集合竞价时段C
+                    # 13 - 连续交易T
+                    # 14 - 休市B
+                    # 15 - 闭市E
+                    # 16 - 波动性中断V
+                    # 17 - 临时停牌P
+                    # 18 - 收盘集合竞价U
+                    # 19 - 盘中集合竞价M
+                    # 20 - 暂停交易至闭市N
+                    # 21 - 获取字段异常
+                    # 22 - 盘后固定价格行情
+                    # 23 - 盘后固定价格行情完毕
 
-                        # 状态码	含义	是否真正"停牌"？
-                        # 1	停牌	✅ 是
-                        # 11	开盘前S	❌ 不是停牌，只是未开盘
-                        # 12	集合竞价时段C	❌ 不是停牌，可以挂单
-                        # 13	连续交易T	❌ 正常交易
-                        # 14	休市B	❌ 午休，不是停牌
-                        # 15	闭市E	❌ 已收盘，不是停牌
-                        # 16	波动性中断V	⚠️ 临时中断
-                        # 17	临时停牌P	✅ 是
-                        # 18	收盘集合竞价U	❌ 可以交易
-                        # 19	盘中集合竞价M	❌ 可以交易
-                        # 20	暂停交易至闭市N	✅ 是
-                        # 22	盘后固定价格行情	❌ 可以交易
-                    #paused = (int(open_int) != 13)
+                    # 状态码	含义	是否真正"停牌"？
+                    # 1	停牌	✅ 是
+                    # 11	开盘前S	❌ 不是停牌，只是未开盘
+                    # 12	集合竞价时段C	❌ 不是停牌，可以挂单
+                    # 13	连续交易T	❌ 正常交易
+                    # 14	休市B	❌ 午休，不是停牌
+                    # 15	闭市E	❌ 已收盘，不是停牌
+                    # 16	波动性中断V	⚠️ 临时中断
+                    # 17	临时停牌P	✅ 是
+                    # 18	收盘集合竞价U	❌ 可以交易
+                    # 19	盘中集合竞价M	❌ 可以交易
+                    # 20	暂停交易至闭市N	✅ 是
+                    # 22	盘后固定价格行情	❌ 可以交易
+                    # paused = (int(open_int) != 13)
                     # 更准确的写法应该是：
                     paused = int(open_int) in (1, 17, 20)  # 或加上 16
             except Exception:
                 pass
             return {
-                'last_price': last_price,
-                'high_limit': high_limit,
-                'low_limit': low_limit,
-                'paused': paused,
+                "last_price": last_price,
+                "high_limit": high_limit,
+                "low_limit": low_limit,
+                "paused": paused,
             }
         except Exception:
             return {}
@@ -1250,7 +1652,7 @@ class MiniQMTProvider(DataProvider):
             stock_gift_raw = float(row.get("stockGift", 0.0) or 0.0)
             stock_bonus_raw = float(row.get("stockBonus", 0.0) or 0.0)
             allot_num_raw = float(row.get("allotNum", 0.0) or 0.0)
-            
+
             if is_fund:
                 # 基金/ETF：per_base=1，直接使用原始值（每1份派息）
                 per_base = 1
@@ -1262,7 +1664,7 @@ class MiniQMTProvider(DataProvider):
                 bonus_pre_tax = interest_raw * 10.0
                 # 送股、转增、配股也是"每1股"，需要乘以10
                 scale = 1.0 + (stock_gift_raw + stock_bonus_raw + allot_num_raw) * 10.0 / 10.0
-            
+
             events.append(
                 {
                     "security": security,
@@ -1305,4 +1707,6 @@ class MiniQMTProvider(DataProvider):
                 adapted.append(converted)
             return adapted
 
-        return self._cache.cached_call("get_split_dividend", kwargs, _fetch, result_type="list_dict")
+        return self._cache.cached_call(
+            "get_split_dividend", kwargs, _fetch, result_type="list_dict"
+        )

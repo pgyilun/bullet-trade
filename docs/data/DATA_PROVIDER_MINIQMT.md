@@ -30,6 +30,14 @@
 - 优先尝试 `xtdata.get_index_stocks`（当版本支持时）。  
 - 若函数不存在或返回空且配置了 `tushare_token`，则自动调用 Tushare 的 `index_weight` 作为后备数据。
 
+## 回测下载去重
+- 默认行为不变：`auto_download` / `MINIQMT_AUTO_DOWNLOAD` 未设置时仍为开启，provider 会按原逻辑调用 `xtdata.download_history_data`。
+- 当用户显式启用回测数据会话时，`mode=backtest` 的 MiniQMTProvider 会在单次回测内按证券、周期和覆盖区间记录已下载数据；覆盖命中后的重复请求会跳过下载，但仍从 QMT 本地数据读取并裁剪请求窗口。
+- 当同时启用回测行情块缓存时，MiniQMTProvider 会按证券、周期和 `dividend_type` 暂存 `xtdata.get_local_data` 返回的本地数据块，后续每日 `count` 窗口只从内存块切片；动态前复权仍用当日 `pre_factor_ref_date` 重新锚定，避免不同参考日串用已锚定价格。
+- 该记录只存在于当前回测进程内，回测结束或异常退出后会清理。`mode=live`、QMT server adapter 和实时行情路径不会读取回测 downloaded 记录，也不会因为回测优化跳过实盘刷新。
+- 回测数据会话不会清理或改写 QMT 官方 xtdata 数据目录，也不会修改用户的 `auto_download` 设置。
+- 如需观测下载次数、覆盖区间和跳过原因，可为回测数据会话配置 manifest 输出。
+
 ## 常见问题
 1. **数据目录权限**：`xtdata.download_history_data` 对安装路径具有写权限要求，建议改为运行在 QMT 安装用户下，或在配置中禁用自动下载并预先同步数据。  
 2. **时区差异**：`xtdata` 返回的时间戳使用毫秒，需要转换为 pandas `datetime`；封装已统一为本地时区，无需额外处理。  

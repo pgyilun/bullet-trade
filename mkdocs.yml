@@ -16,6 +16,7 @@ nav:
   - 研究环境: research.md
   - 配置总览: config.md
   - 回测引擎: backtest.md
+  - 回测数据会话优化: backtest-data-session.md
   - 参数优化: optimize.md
   - 实盘引擎: live.md
   - Tick 行情指南: tick.md

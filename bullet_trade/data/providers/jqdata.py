@@ -4,6 +4,11 @@ import logging
 import os
 import json
 import pandas as pd
+
+from ..pickle_compat import install_pickle_compat_shims
+
+install_pickle_compat_shims()
+
 import jqdatasdk as jq
 from jqdatasdk import finance, query
 

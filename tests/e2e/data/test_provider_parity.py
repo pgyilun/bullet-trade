@@ -392,7 +392,7 @@ def test_miniqmt_resampled_recent_minute_bars_match_jqdata() -> None:
     """
     _check_prerequisites()
     jq, mini = _authenticate_providers()
-    fields = ["open", "high", "low", "close"]
+    fields = ["open", "high", "low", "close", "volume", "money"]
     start = "2026-05-14 09:30:00"
     end = "2026-05-14 10:30:00"
 
@@ -419,4 +419,10 @@ def test_miniqmt_resampled_recent_minute_bars_match_jqdata() -> None:
         pd.testing.assert_index_equal(mini_df.index, jq_df.index)
         for field in fields:
             diff = (mini_df[field].astype(float) - jq_df[field].astype(float)).abs().max()
-            assert diff <= 0.05, f"{frequency} {field} 与 JQData 最大偏差 {diff}"
+            tolerance = 0.05
+            if field == "volume":
+                # QMT 分钟成交量按手给出，转成股后仍可能和聚宽存在零股级舍入差。
+                tolerance = 2000.0
+            elif field == "money":
+                tolerance = 1.0
+            assert diff <= tolerance, f"{frequency} {field} 与 JQData 最大偏差 {diff}"

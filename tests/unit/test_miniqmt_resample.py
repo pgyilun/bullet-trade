@@ -102,11 +102,11 @@ def test_miniqmt_resamples_5m_with_partial_current_bar(monkeypatch):
         {
             "open": [11.0, 16.0],
             "high": [15.5, 17.5],
-            "low": [10.5, 15.5],
+            "low": [9.5, 15.5],
             "close": [15.0, 17.0],
-            "volume": [515.0, 213.0],
+            "volume": [61500.0, 21300.0],
             "money": [
-                sum((10.0 + idx) * (100.0 + idx) for idx in range(1, 6)),
+                sum((10.0 + idx) * (100.0 + idx) for idx in range(0, 6)),
                 sum((10.0 + idx) * (100.0 + idx) for idx in range(6, 8)),
             ],
         },

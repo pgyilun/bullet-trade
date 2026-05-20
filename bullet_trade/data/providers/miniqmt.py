@@ -428,16 +428,36 @@ class MiniQMTProvider(DataProvider):
         return result[ordered.columns]
 
     @staticmethod
-    def _drop_open_auction_minute_for_resample(df: pd.DataFrame) -> pd.DataFrame:
+    def _merge_open_auction_minute_for_resample(df: pd.DataFrame) -> pd.DataFrame:
         """
-        QMT 股票 1m 本地数据可能包含 09:30 集合竞价行；聚宽分钟 K 从 09:31 开始。
+        QMT 股票 1m 本地数据可能包含 09:30 集合竞价行。
+
+        聚宽没有单独的 09:30 行，而是把集合竞价成交量和成交额并入 09:31。
         """
         if df.empty or not isinstance(df.index, pd.DatetimeIndex):
             return df
-        mask = (df.index.hour == 9) & (df.index.minute == 30) & (df.index.second == 0)
-        if not mask.any():
+        if not ((df.index.hour == 9) & (df.index.minute == 30) & (df.index.second == 0)).any():
             return df
-        return df.loc[~mask].copy()
+        merged = df.sort_index().copy()
+        sum_fields = {"volume", "money", "amount"}
+        auction_index = merged.index[
+            (merged.index.hour == 9) & (merged.index.minute == 30) & (merged.index.second == 0)
+        ]
+        for auction_ts in list(auction_index):
+            target_ts = auction_ts.replace(hour=9, minute=31, second=0, microsecond=0)
+            if target_ts not in merged.index:
+                merged = merged.drop(index=auction_ts)
+                continue
+            auction = merged.loc[auction_ts]
+            for col in merged.columns:
+                if col in sum_fields:
+                    merged.loc[target_ts, col] = merged.loc[target_ts, col] + auction[col]
+                elif col == "high":
+                    merged.loc[target_ts, col] = max(merged.loc[target_ts, col], auction[col])
+                elif col == "low":
+                    merged.loc[target_ts, col] = min(merged.loc[target_ts, col], auction[col])
+            merged = merged.drop(index=auction_ts)
+        return merged
 
     # ------------------------ 认证 ------------------------
     def auth(
@@ -767,7 +787,7 @@ class MiniQMTProvider(DataProvider):
                 pre_factor_ref_date=pre_factor_ref_date,
             )
 
-        raw_1m = self._drop_open_auction_minute_for_resample(raw_1m)
+        raw_1m = self._merge_open_auction_minute_for_resample(raw_1m)
         if raw_1m.empty:
             return raw_1m
 
@@ -785,7 +805,7 @@ class MiniQMTProvider(DataProvider):
             if adj_1m.empty:
                 adj_df = self._build_adjusted_from_events(security, raw_df, direction="pre")
             else:
-                adj_1m = self._drop_open_auction_minute_for_resample(adj_1m)
+                adj_1m = self._merge_open_auction_minute_for_resample(adj_1m)
                 adj_df = self._resample_minute_frame(adj_1m, minute_group)
             df = self._align_reference(raw_df, adj_df, pre_factor_ref_date)
             decimals = self._infer_price_decimals_from_raw(raw_1m)
@@ -803,7 +823,7 @@ class MiniQMTProvider(DataProvider):
             if adj_1m.empty:
                 adj_df = self._build_adjusted_from_events(security, raw_df, direction="post")
             else:
-                adj_1m = self._drop_open_auction_minute_for_resample(adj_1m)
+                adj_1m = self._merge_open_auction_minute_for_resample(adj_1m)
                 adj_df = self._resample_minute_frame(adj_1m, minute_group)
             df = self._align_reference(raw_df, adj_df, pre_factor_ref_date, default_to_start=True)
             decimals = self._infer_price_decimals_from_raw(raw_1m)
@@ -1383,6 +1403,8 @@ class MiniQMTProvider(DataProvider):
         df.index.name = None
         df.rename(columns={"amount": "money"}, inplace=True)
         df["money"] = df.get("money", 0.0)
+        if period.endswith("m") and "volume" in df.columns:
+            df["volume"] = df["volume"].astype(float) * 100.0
 
         # 在这里处理 count，确保停牌日数据也被包含
         if end_time and count and not df.empty:

@@ -1071,6 +1071,14 @@ class BacktestEngine:
                         log.debug(f"{code} 分红/拆分事件: 除权日 {eff_date} 未到当日 {current_date}，跳过")
                         continue
 
+                    if self._position_not_eligible_for_action(pos, eff_date):
+                        log.info(
+                            f"{code} 分红/拆分事件跳过: 除权日={eff_date}, "
+                            f"当前持仓建仓日={pos.buy_time.date() if pos.buy_time else None}, "
+                            "持仓不早于除权日，不能参与本次权益事件"
+                        )
+                        continue
+
                     # 检查除权日当天是否停牌：如果停牌则延迟到复牌日处理
                     # 使用直接调用 provider 的方式绕过 avoid_future_data 限制
                     is_paused = self._is_security_paused_on_date(code, eff_date)
@@ -1613,6 +1621,30 @@ class BacktestEngine:
         if ev_date is None:
             return False
         return ev_date <= current_date
+
+    @staticmethod
+    def _position_not_eligible_for_action(pos: "Position", eff_date: datetime.date) -> bool:
+        """判断当前整轮持仓是否没有资格参与权益事件。
+
+        参数:
+            pos: 当前持仓对象，使用 buy_time 表示本轮持仓首次建仓时间。
+            eff_date: 权益事件除权日。
+
+        返回值:
+            如果本轮持仓首次建仓日未知、等于或晚于除权日，返回 True；否则返回 False。
+
+        说明:
+            回测可能在除权日之后数日仍能查到该权益事件。如果该标的是除权日之后才买入，
+            持仓已经按除权后的价格成交，不能再补做拆分或派息，否则会把份额/现金重复计算。
+            除权日当天买入也不能参与本次权益事件；只有跨除权日一直持有的仓位才按原逻辑处理。
+            如果持仓没有 buy_time，无法证明其在除权日前已持有，按保守口径跳过，避免制造虚增。
+        """
+
+        if eff_date is None:
+            return False
+        if pos.buy_time is None:
+            return True
+        return pos.buy_time.date() >= eff_date
 
     def _is_security_paused_on_date(self, security: str, check_date: datetime.date) -> bool:
         """检查标的在指定日期是否停牌。
@@ -2643,6 +2675,15 @@ def _apply_initial_positions(self):
                 pos.acc_avg_cost = ac
                 pos.price = float(close_price or ac)
                 pos.value = pos.total_amount * pos.price
+                raw_buy_time = item.get("buy_time") or item.get("init_time")
+                if raw_buy_time is not None:
+                    try:
+                        pos.buy_time = pd.to_datetime(raw_buy_time).to_pydatetime()
+                    except Exception:
+                        pos.buy_time = None
+                if pos.buy_time is None:
+                    pos.buy_time = pd.to_datetime(self.start_date).to_pydatetime()
+                pos.last_buy_time = pos.buy_time
             except Exception as ie:
                 log.debug(f"初始化持仓失败 {item}: {ie}")
         # 更新账户总值（现金 + 持仓）

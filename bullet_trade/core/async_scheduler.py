@@ -442,20 +442,37 @@ class AsyncScheduler:
         
         self._tasks.append(task)
         self._task_map[task.task_id] = task
-        
-        overlap_labels = {
-            OverlapStrategy.SKIP: "跳过",
-            OverlapStrategy.WAIT: "等待",
-            OverlapStrategy.CONCURRENT: "并发",
-        }
-        overlap_label = overlap_labels.get(task.overlap_strategy, task.overlap_strategy.value)
+
         logger.info(
-            f"✅ 注册任务: {task.task_id} "
-            f"({task.schedule_type.value}, {task.time}, "
-            f"重叠处理: {overlap_label})"
+            f"✅ 已注册定时任务: {task.task_id} "
+            f"({self._format_schedule_description(task)})"
         )
         
         return task.task_id
+
+    @staticmethod
+    def _format_schedule_description(task: AsyncScheduleTask) -> str:
+        """生成面向用户的定时任务描述。"""
+        time_labels = {
+            'every_bar': "每个交易分钟",
+            'every_minute': "每个交易分钟",
+            'open': "开盘时",
+            'close': "收盘时",
+        }
+        time_label = time_labels.get(str(task.time).strip().lower(), task.time)
+
+        if task.schedule_type == ScheduleType.DAILY:
+            if time_label == "每个交易分钟":
+                return time_label
+            return f"每个交易日 {time_label}"
+
+        if task.schedule_type == ScheduleType.WEEKLY and task.weekday is not None:
+            return f"每周第 {task.weekday} 个交易日 {time_label}"
+
+        if task.schedule_type == ScheduleType.MONTHLY and task.monthday is not None:
+            return f"每月第 {task.monthday} 个交易日 {time_label}"
+
+        return f"{task.schedule_type.value} {time_label}"
     
     def unschedule(self, task_id: str):
         """

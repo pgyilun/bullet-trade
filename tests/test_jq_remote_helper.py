@@ -61,6 +61,16 @@ def test_helper_order_sends_zero_wait_timeout():
     assert payload["idempotency_key"].startswith("bt-helper-")
 
 
+def test_helper_idempotency_key_without_time_ns(monkeypatch):
+    monkeypatch.delattr(helper.time, "time_ns", raising=False)
+    broker = helper.RemoteBrokerClient(_RecordingClient(), account_key="default")
+
+    key = broker._make_idempotency_key("000001.XSHE", 100, "BUY", {"type": "market"})
+
+    assert key.startswith("bt-helper-")
+    assert len(key) == len("bt-helper-") + 24
+
+
 def test_helper_order_without_price_sends_market_sell_payload():
     client = _RecordingClient()
     broker = helper.RemoteBrokerClient(client, account_key="default")

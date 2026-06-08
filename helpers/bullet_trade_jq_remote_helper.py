@@ -40,6 +40,13 @@ _DEBUG: bool = True
 HELPER_PROTOCOL_VERSION: int = 1
 
 
+def _now_ns() -> int:
+    time_ns = getattr(time, "time_ns", None)
+    if time_ns is not None:
+        return int(time_ns())
+    return int(time.time() * 1_000_000_000)
+
+
 def _log(level: str, msg: str, *args, **kwargs):
     """
     统一的日志输出函数。
@@ -764,7 +771,7 @@ class RemoteBrokerClient:
         return {"account_key": self.account_key, "sub_account_id": self.sub_account_id}
 
     def _make_idempotency_key(self, security: str, amount: int, side: str, style: Dict[str, Any]) -> str:
-        raw = f"{security}|{amount}|{side}|{style}|{time.time_ns()}|{os.urandom(8).hex()}"
+        raw = f"{security}|{amount}|{side}|{style}|{_now_ns()}|{os.urandom(8).hex()}"
         return "bt-helper-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 

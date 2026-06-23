@@ -5,6 +5,22 @@
 
 ## [未发布]
 
+## [0.8.1] - 2026-06-23
+
+### 新增
+- **聚宽模拟盘接管兼容层**：新增 `install_jq_compat(...)`，在聚宽回测中保持原平台行为，在模拟盘中接管 `context.portfolio`、`context.subportfolios` 和常用交易函数，把现金、持仓和下单统一到 BulletTrade 远程账户。
+- **聚宽风格下单函数补齐**：远程 helper 支持 `order_percent`、`order_target_percent`、`MarketOrderStyle`、`LimitOrderStyle` 和 `value` 参数别名，覆盖 `order(...)`、`order_target_value(...)`、`order_target_percent(...)` 等常见聚宽策略写法。
+
+### 兼容性
+- **实盘接管默认同步等待**：`install_jq_compat` 包装后的聚宽同名下单函数默认同步等待 16 秒；低层 `bt.order(...)` 等显式 helper 调用继续保持原有默认异步语义。
+- **交易范围显式收口**：第一版兼容股票/ETF 多头常用交易，遇到 `side="short"`、`pindex!=0`、`close_today=True` 或停止单时显式报错，避免静默按错误语义下单。
+
+### 文档
+- **聚宽接入方案文档**：新增方案 A 显式调用 helper、方案 B 接管聚宽函数、两种方案对比和模拟盘完全接管设计说明，并同步更新新手路线、交易支撑页和 MkDocs 导航。
+
+### 测试
+- **聚宽远程 helper 回归覆盖**：补充回测不接管、模拟盘远程账户代理、默认等待窗口、按比例下单、订单样式映射和不支持参数拒绝等单元测试。
+
 ## [0.8.0] - 2026-06-16
 
 ### 新增

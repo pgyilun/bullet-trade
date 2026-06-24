@@ -159,6 +159,7 @@ class BacktestEngine:
         self.orders: Dict[str, Order] = {}  # 当日订单快照
         self.events = []  # 事件记录（分红/拆分）
         self._processed_dividend_keys = set()  # 已处理的分红事件键（避免重复处理）
+        self._split_price_adjustments: Dict[Tuple[str, date], Dict[str, float]] = {}
         self.benchmark_data = None  # 基准数据
         # 新增：每日持仓快照记录
         self.daily_positions = []
@@ -1447,6 +1448,15 @@ class BacktestEngine:
         if pos.price > 0:
             pos.price = pos.price / split_ratio
         pos.value = pos.total_amount * pos.price
+        process_date = (
+            self.context.current_dt.date()
+            if self.context is not None and self.context.current_dt is not None
+            else eff_date
+        )
+        self._split_price_adjustments[(code, process_date)] = {
+            "split_ratio": float(split_ratio),
+            "adjusted_price": float(pos.price),
+        }
 
         new_pos_value = pos.total_amount * pos.price
         positions_value_after = positions_value_before - old_pos_value + new_pos_value
@@ -1483,6 +1493,53 @@ class BacktestEngine:
                 "total_value_after": float(total_value_after),
             }
         )
+
+    def _normalize_split_day_close_price(self, security: str, close_price: float) -> float:
+        """将拆分生效日的收盘价统一到当前持仓份额口径。
+
+        Args:
+            security: 当前持仓标的代码。
+            close_price: 行情源返回的原始收盘价。
+
+        Returns:
+            float: 可直接用于当前持仓股数估值的收盘价。
+
+        说明:
+            部分数据源在拆分/送转生效日，尤其叠加停牌时，会返回拆分前旧价。
+            此时引擎已经调整了持仓股数，如果直接用旧价估值会制造假回撤。
+            本函数只在当日确实执行过拆分时介入；正常交易日保持原价。
+        """
+        raw_close = float(close_price)
+        if self.context is None or self.context.current_dt is None:
+            return raw_close
+        current_date = self.context.current_dt.date()
+        adjustment = self._split_price_adjustments.get((security, current_date))
+        if not adjustment:
+            return raw_close
+
+        split_ratio = float(adjustment.get("split_ratio") or 1.0)
+        adjusted_price = float(adjustment.get("adjusted_price") or 0.0)
+        if split_ratio <= 0 or adjusted_price <= 0 or abs(split_ratio - 1.0) <= 1e-9:
+            return raw_close
+
+        if abs(raw_close / adjusted_price - 1.0) <= 0.2:
+            return raw_close
+
+        converted_price = raw_close / split_ratio
+        if converted_price > 0 and abs(converted_price / adjusted_price - 1.0) <= 0.2:
+            log.info(
+                f"{security} 拆分日收盘价口径修正: "
+                f"原始close={raw_close:.4f}, 拆分比例={split_ratio:.6f}, "
+                f"修正后close={converted_price:.4f}"
+            )
+            return converted_price
+
+        log.warning(
+            f"{security} 拆分日收盘价疑似与持仓份额不同口径: "
+            f"原始close={raw_close:.4f}, 拆分后持仓价={adjusted_price:.4f}, "
+            f"拆分比例={split_ratio:.6f}; 保留拆分后持仓价估值"
+        )
+        return adjusted_price
 
     @staticmethod
     def _infer_tplus_from_info(info):
@@ -2318,7 +2375,8 @@ class BacktestEngine:
                     continue
 
                 if pd.notna(close_price) and close_price > 0:
-                    self.context.portfolio.positions[security].update_price(float(close_price))
+                    price = self._normalize_split_day_close_price(security, float(close_price))
+                    self.context.portfolio.positions[security].update_price(price)
             except Exception as e:
                 log.debug(f"更新{security}价格失败: {e}")
 

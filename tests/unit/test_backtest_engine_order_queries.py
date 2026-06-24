@@ -138,6 +138,70 @@ def test_backtest_engine_get_open_orders_includes_submitted_string_status():
     assert "submitted-1" in open_orders
 
 
+def test_split_day_stale_close_keeps_adjusted_position_value(monkeypatch):
+    """拆分生效日行情仍返回旧价时，日终估值应保持拆分后口径。"""
+
+    security = "510500.XSHG"
+    split_ratio = 166064 / 592400
+    engine = BacktestEngine(initialize=_dummy_initialize, handle_data=_dummy_handle_data)
+    portfolio = Portfolio(
+        total_value=0.0,
+        available_cash=140268.85,
+        transferable_cash=140268.85,
+        starting_cash=1000000.0,
+    )
+    portfolio.positions[security] = Position(
+        security=security,
+        total_amount=592400,
+        closeable_amount=592400,
+        avg_cost=1.7233,
+        price=2.243,
+        value=592400 * 2.243,
+        buy_time=datetime.datetime(2015, 4, 10, 15, 0, 0),
+    )
+    portfolio.update_value()
+    engine.context = Context(
+        portfolio=portfolio,
+        current_dt=datetime.datetime(2015, 4, 14, 15, 0, 0),
+    )
+    engine.start_total_value = portfolio.total_value
+    before_total_value = portfolio.total_value
+
+    monkeypatch.setattr(
+        engine,
+        "_load_corporate_actions",
+        lambda *_args, **_kwargs: [
+            {
+                "security": security,
+                "date": datetime.date(2015, 4, 14),
+                "security_type": "fund",
+                "scale_factor": split_ratio,
+                "bonus_pre_tax": 0.0,
+                "per_base": 10,
+            }
+        ],
+    )
+    monkeypatch.setattr(engine, "_is_security_paused_on_date", lambda *_args, **_kwargs: False)
+    engine._apply_dividends_for_day(datetime.datetime(2015, 4, 14, 9, 0, 0))
+
+    pos = portfolio.positions[security]
+    expected_adjusted_price = 2.243 / split_ratio
+    assert pos.total_amount == 166064
+    assert pos.price == pytest.approx(expected_adjusted_price)
+    assert portfolio.total_value == pytest.approx(before_total_value)
+
+    monkeypatch.setattr(
+        "bullet_trade.core.engine.api_get_price",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            [{"close": 2.243}], index=[pd.Timestamp("2015-04-14")]
+        ),
+    )
+    engine._update_positions()
+
+    assert pos.price == pytest.approx(expected_adjusted_price)
+    assert portfolio.total_value == pytest.approx(before_total_value)
+
+
 def test_price_argument_creates_limit_order_style_for_order_helpers(monkeypatch):
     monkeypatch.setattr(
         "bullet_trade.core.orders._trigger_order_processing", lambda *args, **kwargs: None
